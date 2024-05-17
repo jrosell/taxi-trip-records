@@ -14,12 +14,17 @@ suppressPackageStartupMessages({
     library(tidypolars)
     library(duckplyr)
     library(sparklyr)
+    library(purrr)
+    library(testthat)
 })
 options(
     # sparklyr.log.console = TRUE,
     # sparklyr.simple.errors = TRUE
     timeout = 9999
 )
+c("data", "output") |> 
+    here::here() |>
+    walk(\(x) dir.create(x, showWarnings = FALSE))
 # Source: 2023 & 2022 High Volume For-Hire Vehicle Trip Records https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page
 parquet_source <- file_name <- "data/fhvhv_tripdata_*.parquet"
 # file_name <- "data/fhvhv_tripdata_2023-12.parquet"
@@ -34,37 +39,39 @@ duckdb_set_threads <- \(threads) {
     invisible()
 }
 duckdb_set_threads(8)
-if (nrow(sparklyr::spark_installed_versions()) == 0) {
-    spark_available_versions(
-        show_hadoop = TRUE,
-        show_minor = TRUE,
-        show_future = TRUE
-    )
-    # sparklyr::spark_uninstall(version = "2.4.3", hadoop_version = "2.7")
-    sparklyr::spark_install(
-        version = "3.2.4",
-        hadoop_version = "3.2"
-    )
-}
-sc <- sparklyr::spark_connect(master = "local", version = "3.2.4")
+# if (nrow(sparklyr::spark_installed_versions()) == 0) {
+#     spark_available_versions(
+#         show_hadoop = TRUE,
+#         show_minor = TRUE,
+#         show_future = TRUE
+#     )
+#     # sparklyr::spark_uninstall(version = "2.4.3", hadoop_version = "2.7")
+#     sparklyr::spark_install(
+#         version = "3.2.4",
+#         hadoop_version = "3.2"
+#     )
+# }
+# sc <- sparklyr::spark_connect(master = "local", version = "3.2.4")
+# Sys.sleep(10)
 
 res <- bench::mark(
-    dplyr_sparklyr = {
-        print("dplyr_sparklyr")
-        df <- sparklyr::stream_read_parquet(
-                sc,
-                path = parquet_source
-            ) |>
-            select(airport_fee, pickup_datetime) |>
-            filter(airport_fee > 0) |>
-            mutate(day = as.Date(pickup_datetime)) |>
-            summarise(count = n(), .by = day) |>
-            arrange(desc(count)) |>
-            collect()
-        print(as_tibble(df), n = Inf)
-        df <- NULL
-        gc()
-    },
+    # dplyr_sparklyr = {
+    #     print("dplyr_sparklyr")
+    #     df <- sparklyr::stream_read_parquet(
+    #             sc,
+    #             path = parquet_source
+    #         ) |>
+    #         select(airport_fee, pickup_datetime) |>
+    #         filter(airport_fee > 0) |>
+    #         mutate(day = as.Date(pickup_datetime)) |>
+    #         summarise(count = n(), .by = day) |>
+    #         arrange(desc(count)) |>
+    #         collect() |>
+    #         as_tibble()
+    #     print(df, n = Inf)
+    #     gc()
+    #     dplyr_sparklyr <- df
+    # },
     dplyr_arrow = {
         print("dplyr_arrow")
         df <- arrow::open_dataset(file_names) |>
@@ -72,83 +79,89 @@ res <- bench::mark(
             filter(airport_fee > 0) |>
             mutate(day = as.Date(pickup_datetime)) |>
             summarise(count = n(), .by = day) |>
-            arrange(desc(count)) |>
-            collect()
-        print(as_tibble(df), n = Inf)
-        df <- NULL
+            collect() |> 
+            as_tibble() |> 
+            mutate(
+                day = as.character(day),
+                count = as.integer(count)
+            ) |> 
+            arrange(desc(count), day)
+        print(df, n = Inf)
         gc()
+        dplyr_arrow <- df
     },
-    # dplyr_tidypolars = {
-    #     print("dplyr_tidypolars")
-    #     df <- polars::pl$scan_parquet(parquet_source)  |>
-    #         select(airport_fee, pickup_datetime) |>
-    #         filter(airport_fee > 0) |>
-    #         mutate(day = as.Date(pickup_datetime)) |> # `tidypolars` doesn't know how to translate this function: `as.Date()`
-    #         summarise(count = n(), .by = day) |>
-    #         arrange(desc(count)) |>
-    #         collect()
-    #     print(as_tibble(df), n = Inf)
-    #     df <- NULL
-    #     gc()
-    # },
-    dplyr_duckdb = {
-        print("dplyr_duckdb")
-        df <- arrow::open_dataset(file_names) |>
-            to_duckdb()  |>
-            select(airport_fee, pickup_datetime) |>
-            filter(airport_fee > 0) |>
-            mutate(day = as.Date(pickup_datetime)) |>
-            summarise(count = n(), .by = day) |>
-            arrange(desc(count)) |>
-            collect()
-        print(as_tibble(df), n = Inf)
-        df <- NULL
-        gc()
-    },
-    duckplyr = {
-        print("duckplyr")
-        df <- duckplyr::duckplyr_df_from_parquet(file_names) |>
-            select(airport_fee, pickup_datetime) |>
-            filter(airport_fee > 0) |>
-            mutate(day = as.Date(pickup_datetime)) |>
-            summarise(count = n(), .by = day) |>
-            arrange(desc(count)) |>
-            collect()
-        print(as_tibble(df), n = Inf)
-        df <- NULL
-        gc()
-    },
-    polars = {
-        print("polars")
+    polars_lazy = {
+        print("polars_lazy")
         df <- polars::pl$scan_parquet(parquet_source)$
             select("airport_fee", "pickup_datetime")$
             filter(pl$col("airport_fee") > 0)$
             with_columns(
-                 pl$date(
+                pl$date(
                     pl$col("pickup_datetime")$dt$year(),
                     pl$col("pickup_datetime")$dt$month(),
                     pl$col("pickup_datetime")$dt$day()
                 )$alias("day")
             )$
             group_by(pl$col("day"))$
-            agg(pl$count("airport_fee")$alias("count"))$ # $ #   pl$col("random")$count()$alias("count")
-            sort(pl$col("count"), descending = TRUE)$
-            collect(streaming = TRUE)
-        print(as_tibble(df), n = Inf)
-        df <- NULL
+            agg(pl$count("day")$alias("count"))$ # $ #   pl$col("random")$count()$alias("count")
+            collect(streaming = TRUE) |>
+            as_tibble() |> 
+            mutate(
+                day = as.character(day),
+                count = as.integer(count)
+            ) |> 
+            arrange(desc(count), day)
+        print(df, n = Inf)
         gc()
+        polars_lazy <- df
     },
-    memory = FALSE,
+    dplyr_duckdb = {
+        print("dplyr_duckdb")
+        df <- arrow::open_dataset(file_names) |>
+            select(airport_fee, pickup_datetime) |>
+            filter(airport_fee > 0) |>
+            mutate(day = as.Date(pickup_datetime)) |>
+            summarise(count = n(), .by = day) |>
+            to_duckdb()  |>
+            collect() |> 
+            as_tibble() |> 
+            mutate(
+                day = as.character(day),
+                count = as.integer(count)
+            ) |> 
+            arrange(desc(count), day)
+        print(df, n = Inf)
+        gc()
+        dplyr_duckdb <- df
+    },
+    dplyr_duckplyr = {
+        print("dplyr_duckplyr")
+        df <- duckplyr::duckplyr_df_from_parquet(parquet_source) |>
+            select(airport_fee, pickup_datetime) |>
+            filter(airport_fee > 0) |>
+            mutate(day = as.Date(pickup_datetime)) |>
+            summarise(count = n(), .by = day) |>
+            collect() |> 
+            as_tibble() |> 
+            mutate(
+                day = as.character(day),
+                count = as.integer(count)
+            ) |> 
+            arrange(desc(count), day)
+        print(df, n = Inf)
+        gc()
+        dplyr_duckplyr <- df
+    },
+    memory = TRUE,
     filter_gc = FALSE,
-    min_iterations = 3,
-    check = FALSE
+    min_iterations = 10,
+    check = TRUE
 )
-spark_disconnect(sc)
+# spark_disconnect(sc)
 
 print(res)
-# p <- ggplot2::autoplot(res) + labs(title = paste(n, "rows"))
-p <- ggplot2::autoplot(res, type = "violin")
-dir.create(here::here("output"))
+# p <- ggplot2::autoplot(res, type = "violin")
+p <- ggplot2::autoplot(res, type = "jitter")
 pdf(NULL)
 ggsave(
     here::here("output", paste0(Sys.Date(), ".png")),

@@ -38,7 +38,7 @@ duckdb_set_threads <- \(threads) {
     dbExecute(conn = conn, paste0("PRAGMA threads='", threads, "'"))
     invisible()
 }
-duckdb_set_threads(8)
+duckdb_set_threads(threads)
 # if (nrow(sparklyr::spark_installed_versions()) == 0) {
 #     spark_available_versions(
 #         show_hadoop = TRUE,
@@ -51,7 +51,10 @@ duckdb_set_threads(8)
 #         hadoop_version = "3.2"
 #     )
 # }
-# sc <- sparklyr::spark_connect(master = "local", version = "3.2.4")
+# conf <- sparklyr::spark_config()
+# conf$`spark.sql.session.timeZone`  <- "UTC"
+# conf$`sparklyr.cores.local` <- threads
+# sc <- sparklyr::spark_connect(master = "local", version = "3.2.4", config = conf)
 # Sys.sleep(10)
 
 res <- bench::mark(
@@ -67,7 +70,12 @@ res <- bench::mark(
     #         summarise(count = n(), .by = day) |>
     #         arrange(desc(count)) |>
     #         collect() |>
-    #         as_tibble()
+    #         as_tibble() |> 
+    #         mutate(
+    #             day = as.character(day),
+    #             count = as.integer(count)
+    #         ) |> 
+    #         arrange(desc(count), day)
     #     print(df, n = Inf)
     #     gc()
     #     dplyr_sparklyr <- df
@@ -96,11 +104,7 @@ res <- bench::mark(
             select("airport_fee", "pickup_datetime")$
             filter(pl$col("airport_fee") > 0)$
             with_columns(
-                pl$date(
-                    pl$col("pickup_datetime")$dt$year(),
-                    pl$col("pickup_datetime")$dt$month(),
-                    pl$col("pickup_datetime")$dt$day()
-                )$alias("day")
+                day = pl$col("pickup_datetime")$dt$strftime("%Y-%m-%d") # as.Date not available in polars
             )$
             group_by(pl$col("day"))$
             agg(pl$count("day")$alias("count"))$ # $ #   pl$col("random")$count()$alias("count")
@@ -118,11 +122,11 @@ res <- bench::mark(
     dplyr_duckdb = {
         print("dplyr_duckdb")
         df <- arrow::open_dataset(file_names) |>
+            to_duckdb() |>
             select(airport_fee, pickup_datetime) |>
             filter(airport_fee > 0) |>
             mutate(day = as.Date(pickup_datetime)) |>
             summarise(count = n(), .by = day) |>
-            to_duckdb()  |>
             collect() |> 
             as_tibble() |> 
             mutate(

@@ -6,4 +6,4 @@ Here I used the monthly 2021, 2022 and 2023 "High Volume For-Hire Vehicle Trip R
 
 You can execute the run.R file to generate the plot with the results of the benchmark. Here my results:
 
-![](output/2024-05-17.png)
+![](output/2024-05-29.png)
